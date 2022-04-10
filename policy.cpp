@@ -91,7 +91,7 @@ public:
         
         sort(player_cards.begin(), player_cards.end());
         // Memoization
-        long long hash_key = cards_hash(player_cards);
+        long long hash_key = cards_hash(player_cards) + cards_hash(remain_cards);
         if (mem.find(hash_key) != mem.end())
             return mem[hash_key];
         // format: [dealer win, even, player win]
@@ -116,9 +116,9 @@ public:
             for (int i=player_stand_points_index+1; i<6; i++)
                 stand_rate[0] += dealer_result[i];
             stand_rate[2] += dealer_result[6];
-            if (!only_one_hit || player_cards.size() == 2) {
+            if (!only_one_hit || player_cards.size() <= 2) {
                 // if it's not double down or it's just first card to receive, 
-                // We ad-hocly find the next card.
+                // We find the next card by ad-hoc.
 
                 // Calculate current # of cards
                 int remain_cards_num = 0;
@@ -156,71 +156,100 @@ public:
         }
         return mem[hash_key] = {stand_rate, hit_rate};
     }
-    pair<double, double> initial_EV(vector<int> &remain_cards) {
+    pair<double, double> initial_EV(vector<int> &remain_cards, vector<int> &initial_cards, int split_count=1) {
         // Calculate current # of cards
         int remain_cards_num = 0;
         for (int i=0; i<10; i++)
             remain_cards_num += remain_cards[i];
 
         double return_ev = 0, return_winrate = 0;
-        for (int i=1; i<=10; i++) {
-            for (int j=i; j<=10; j++) {
-                if (i == j && remain_cards[i-1] <= 1)
-                    continue;
-                if (remain_cards[i-1] == 0 || remain_cards[j-1] == 0)
-                    continue;
-                double cards_prob;
-                if (i == j)
-                    cards_prob = remain_cards[i-1] * (remain_cards[i-1] - 1);
-                else
-                    cards_prob = 2 * remain_cards[i-1] * remain_cards[j-1];
-                cards_prob /= remain_cards_num * (remain_cards_num - 1);
-                // Effect in remain_cards
-                remain_cards[i-1]--, remain_cards[j-1]--;
 
-                vector<int> player_cards{i, j}, dealer_cards{};
-                int player_points = get_points(player_cards);
-                auto result = get_policy(player_cards, dealer_cards, remain_cards, true);
-                double stand_ev = result.first[2] - result.first[0];
-                double hit_ev = result.second[2] - result.second[0];
-                double best_ev = max(stand_ev, hit_ev);
-                double best_win = max(result.first[2], result.second[2]);
-                if (player_points == 21) {
-                    // Black jack will return 1.5
-                    double dealer_black_jack_prob = 2 * remain_cards[0] * remain_cards[9];
-                    dealer_black_jack_prob /= (remain_cards_num-2) * (remain_cards_num-3);
-                    best_ev = (1 - dealer_black_jack_prob) * 1.5;
-                    best_win = (1 - dealer_black_jack_prob);
-                } else if (9 <= player_points && player_points <= 11) {
-                    // Double Down
-                    Policy tmp_policy;
-                    auto dd_result = tmp_policy.get_policy(player_cards, dealer_cards, remain_cards, true, true).second;
-                    best_ev = max(best_ev, (dd_result[2] - dd_result[0])*2);
-                } else if (i == j){
-                    // Split
-                    vector<int> split_player_cards{i};
-                    auto sp_result = get_policy(split_player_cards, dealer_cards, remain_cards, true).second;
-                    best_ev = max(best_ev, (sp_result[2] - sp_result[0])*2);
-                    double split_win = sp_result[2] * sp_result[2] + 2 * sp_result[2] * sp_result[1];
-                    best_win = max(best_win, split_win);
+        struct Situation
+        {
+            vector<int> player_cards, dealer_cards, remain_cards;
+            double cards_prob;
+        };
+        vector<Situation> situations{};
+        if (initial_cards.size() == 0) {
+            for (int i=1; i<=10; i++) {
+                for (int j=i; j<=10; j++) {
+                    if (i == j && remain_cards[i-1] <= 1)
+                        continue;
+                    if (remain_cards[i-1] == 0 || remain_cards[j-1] == 0)
+                        continue;
+                    double cards_prob;
+                    if (i == j)
+                        cards_prob = remain_cards[i-1] * (remain_cards[i-1] - 1);
+                    else
+                        cards_prob = 2 * remain_cards[i-1] * remain_cards[j-1];
+                    cards_prob /= remain_cards_num * (remain_cards_num - 1);
+                    // Effect in remain_cards
+                    remain_cards[i-1]--, remain_cards[j-1]--;
+                    situations.push_back({{i, j}, {}, remain_cards, cards_prob});
+                    // Recover in remain_cards
+                    remain_cards[i-1]++, remain_cards[j-1]++;
                 }
-                // Add ev
-                return_ev += cards_prob * best_ev;
-                return_winrate += cards_prob * best_win;
-                // Recover in remain_cards
-                remain_cards[i-1]++, remain_cards[j-1]++;
             }
+        } else if (initial_cards.size() == 1) {
+            // This block is special for split rule.
+            for (int i=1; i<=10; i++) {
+                if (remain_cards[i-1] == 0)
+                    continue;
+                double cards_prob = 1.0 * remain_cards[i-1] / remain_cards_num;
+                // Effect in remain_cards
+                remain_cards[i-1]--;
+                situations.push_back({{initial_cards[0], i}, {}, remain_cards, cards_prob});
+                // Recover in remain_cards
+                remain_cards[i-1]++;
+            }
+        } else {
+            situations.push_back({initial_cards, {}, remain_cards, 1});
+        }
+        for (Situation situation : situations) {
+            int player_points = get_points(situation.player_cards);
+            auto result = get_policy(situation.player_cards, situation.dealer_cards, situation.remain_cards, true, false);
+            double stand_ev = result.first[2] - result.first[0];
+            double hit_ev = result.second[2] - result.second[0];
+            double best_ev = max(stand_ev, hit_ev);
+            double best_win = max(result.first[2], result.second[2]);
+            if (player_points == 21) {
+                // Black jack will return 1.5
+                double dealer_black_jack_prob = 2 * situation.remain_cards[0] * situation.remain_cards[9];
+                dealer_black_jack_prob /= (remain_cards_num-2) * (remain_cards_num-3);
+                best_ev = (1 - dealer_black_jack_prob) * 1.5;
+                best_win = (1 - dealer_black_jack_prob);
+            } else {
+                // Double Down
+                if (9 <= player_points && player_points <= 11) {
+                    Policy tmp_policy;
+                    auto dd_result = tmp_policy.get_policy(
+                        situation.player_cards, 
+                        situation.dealer_cards, 
+                        situation.remain_cards, true, true).second;
+                    best_ev = max(best_ev, (dd_result[2] - dd_result[0])*2);
+                }
+                if (situation.player_cards[0] == situation.player_cards[1] && split_count >= 1) {
+                    // Split
+                    vector<int> split_player_cards{situation.player_cards[0]};
+                    auto sp_result = initial_EV(situation.remain_cards, split_player_cards, split_count-1);
+                    best_ev = max(best_ev, sp_result.first*2);
+                    best_win = max(best_win, sp_result.second);
+                }
+            }
+            // Add ev
+            return_ev += situation.cards_prob * best_ev;
+            return_winrate += situation.cards_prob * best_win;
         }
         return {return_ev, return_winrate};
     }
 };
 extern "C" {
     __declspec(dllexport) double calculate_ev(int16_t* input) {
-        vector<int> card_nums(10, 0);
+        vector<int> card_nums(10, 0), ini{};
         for(int i=0; i<10;i++)
             card_nums[i] = input[i];
         Policy policy;
-        auto result = policy.initial_EV(card_nums);
+        auto result = policy.initial_EV(card_nums, ini, 2);
         // printf("%.6f %.6f%%\n",result.first, result.second*100);
         return result.first;
     }
@@ -230,10 +259,10 @@ extern "C" {
 
 int main(int argc, char **argv) {
     // FILE *fout = fopen("EV.log", "a");
-    vector<int> card_nums{24, 20, 20, 20, 20, 24, 24, 24, 24, 96};
+    vector<int> card_nums{24, 24, 24, 24, 24, 24, 24, 24, 24, 96}, ini{};
     Policy policy;
-    auto result = policy.initial_EV(card_nums);
-    printf("%.6f %.6f%%\n",result.first, result.second*100);
+    auto result = policy.initial_EV(card_nums, ini, 2);
+    printf("%.10f %.6f%%\n",result.first, result.second*100);
 
     // string to_c = "-A23456789T";
     // vector<int> dealer_cards{1};
